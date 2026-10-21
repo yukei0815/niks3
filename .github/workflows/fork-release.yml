@@ -1,0 +1,44 @@
+# Releases this fork's binaries. Disable upstream's "Release" and "Build Docker
+# Image" workflows in the Actions tab: they also run on v* tags.
+name: Fork release
+on:
+  push:
+    tags:
+      - "v*"
+permissions:
+  contents: write
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+      - run: nix build -L .#checks.x86_64-linux.go-unit-tests .#checks.x86_64-linux.golangci-lint
+  goreleaser:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+      - name: Run GoReleaser
+        run: nix shell --inputs-from . nixpkgs#goreleaser --command goreleaser release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # checksums.txt lists every archive, so one attestation covers them all.
+      - name: Attest release archives
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-checksums: dist/checksums.txt

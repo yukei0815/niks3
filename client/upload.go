@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -315,6 +316,40 @@ type skippedUploads struct {
 	Reasons  map[string]string // by top-level path
 }
 
+// upstreamCacheKeyName is the signing key of the upstream cache. Like Attic's
+// upstream_cache_key_names, paths it signed are not pushed.
+const upstreamCacheKeyName = "cache.nixos.org-1"
+
+// isUpstreamPath reports whether upstreamCacheKeyName signed info.
+func isUpstreamPath(info *PathInfo) bool {
+	return slices.ContainsFunc(info.Signatures, func(sig string) bool {
+		return strings.HasPrefix(sig, upstreamCacheKeyName+":")
+	})
+}
+
+// filterUpstreamPaths drops paths that upstream caches already serve from the
+// top-level paths and pathInfos. Narinfos of the kept paths still list them
+// as references, and substituters fetch them from the upstream cache.
+func filterUpstreamPaths(topLevelPaths []string, pathInfos map[string]*PathInfo) ([]string, map[string]*PathInfo) {
+	kept := make(map[string]*PathInfo, len(pathInfos))
+
+	for path, info := range pathInfos {
+		if !isUpstreamPath(info) {
+			kept[path] = info
+		}
+	}
+
+	if skipped := len(pathInfos) - len(kept); skipped > 0 {
+		slog.Info(fmt.Sprintf("Skipping %d paths signed by an upstream cache", skipped))
+	}
+
+	return slices.DeleteFunc(slices.Clone(topLevelPaths), func(p string) bool {
+		_, ok := kept[p]
+
+		return !ok
+	}), kept
+}
+
 // filterOversizedClosures drops top-level paths whose closure contains a path
 // with NarSize larger than maxNarSize. A limit of 0 disables filtering. It returns the kept
 // top-level paths, pathInfos pruned to paths still reachable from them, and
@@ -601,6 +636,13 @@ func (c *Client) PushPaths(ctx context.Context, paths []string) ([]string, error
 	closurePaths := make([]string, 0, len(pathInfos))
 	for storePath := range pathInfos {
 		closurePaths = append(closurePaths, storePath)
+	}
+
+	resolvedPaths, pathInfos = filterUpstreamPaths(resolvedPaths, pathInfos)
+	if len(resolvedPaths) == 0 {
+		slog.Info("All paths are served by an upstream cache, nothing to upload")
+
+		return closurePaths, nil
 	}
 
 	// Skip closures containing paths larger than the server's max NAR size.

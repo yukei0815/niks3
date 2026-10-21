@@ -1,0 +1,60 @@
+# Rebases this fork's commits onto each new upstream release and tags the
+# result once the tests pass. The tag push starts fork-release.yml.
+# Schedules only run on the default branch, so make skip-cached the default.
+name: Sync upstream
+on:
+  schedule:
+    - cron: "37 5 * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: sync-upstream
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      # GITHUB_TOKEN pushes don't start fork-release.yml, and the rebased
+      # commits add workflow files, which needs the app's workflows permission.
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          client-id: ${{ vars.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+      - uses: actions/checkout@v5
+        with:
+          ref: skip-cached
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          upstream=$(gh release view -R Mic92/niks3 --json tagName -q .tagName)
+          if [[ -n "$(git tag -l "$upstream-skipcached.*")" ]]; then
+            echo "$upstream is already released"
+            exit 0
+          fi
+          echo "upstream=$upstream" >>"$GITHUB_OUTPUT"
+      - if: steps.check.outputs.upstream
+        env:
+          UPSTREAM: ${{ steps.check.outputs.upstream }}
+        run: |
+          git config user.name 'tsubomi-kido[bot]'
+          git config user.email '342627908+tsubomi-kido[bot]@users.noreply.github.com'
+          git fetch --no-tags https://github.com/Mic92/niks3 \
+            +refs/heads/main:refs/remotes/upstream/main \
+            "+refs/tags/$UPSTREAM:refs/tags/$UPSTREAM"
+          # Only replay this fork's commits, whatever upstream commit they are on.
+          git rebase --onto "$UPSTREAM" "$(git merge-base HEAD upstream/main)"
+      - if: steps.check.outputs.upstream
+        uses: cachix/install-nix-action@v31
+      - if: steps.check.outputs.upstream
+        run: nix build -L .#checks.x86_64-linux.go-unit-tests .#checks.x86_64-linux.golangci-lint
+      - if: steps.check.outputs.upstream
+        env:
+          TAG: ${{ steps.check.outputs.upstream }}-skipcached.1
+        run: |
+          git push --force-with-lease=skip-cached origin HEAD:refs/heads/skip-cached
+          git tag "$TAG"
+          git push origin "$TAG"

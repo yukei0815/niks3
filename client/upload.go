@@ -138,6 +138,12 @@ func PrepareClosures(ctx context.Context, topLevelPaths []string, pathInfos map[
 		var references []string
 
 		for _, ref := range pathInfo.References {
+			// The narinfo still lists filtered upstream paths, but the
+			// server has no object for them to check or keep alive.
+			if _, ok := pathInfos[ref]; !ok {
+				continue
+			}
+
 			refHash, err := GetStorePathHash(ref)
 			if err != nil {
 				return nil, fmt.Errorf("getting reference hash: %w", err)
@@ -601,6 +607,13 @@ func (c *Client) PushPaths(ctx context.Context, paths []string) ([]string, error
 	closurePaths := make([]string, 0, len(pathInfos))
 	for storePath := range pathInfos {
 		closurePaths = append(closurePaths, storePath)
+	}
+
+	resolvedPaths, pathInfos = filterUpstreamPaths(resolvedPaths, pathInfos)
+	if len(resolvedPaths) == 0 {
+		slog.Info("All paths are served by an upstream cache, nothing to upload")
+
+		return closurePaths, nil
 	}
 
 	// Skip closures containing paths larger than the server's max NAR size.
